@@ -1,6 +1,7 @@
 #include <iostream>
 #include <sstream>
 #include <vector>
+#include <map>
 #include <algorithm>
 #include <thread>
 #include <mutex>
@@ -19,19 +20,19 @@
 
 using namespace std;
 
-mutex rip_mtx;
-mutex routing_mtx;
+mutex mtx;
 
 class RoutingTableEntry {
 public:
     int dest_id;
-    int next_hop_id;
-    int cost;
+    int next_hop_id = -1;
+    int cost = 16;
+    vector<int> gids;
     RoutingTableEntry(int dest);
     void print();
 };
 
-RoutingTableEntry::RoutingTableEntry(int dest): dest_id(dest), next_hop_id(-1), cost(16) { }
+RoutingTableEntry::RoutingTableEntry(int dest): dest_id(dest) { }
 
 void RoutingTableEntry::print() {
     cout << "dest = "
@@ -46,23 +47,31 @@ void RoutingTableEntry::print() {
 class Node {
 public:
     int id;
-    bool is_new_packet = false;
-    int packet = 0;
-    unsigned dest = 0;
+    vector<int> gids;
     vector<Node*> neighbors;
     vector<RoutingTableEntry> routing_table;
+
+    bool is_new_packet = false;
+    int packet = -1;
+    int src = -1;
+    int dest = -1;
+    int from = -1;
 
     Node(): Node(-1) { }
     Node(int id): id(id) { }
     
     void start_routing();
-    void start_simplified_rip();
+    void start_simplified_dvmrp();
     void run_routing();
-    void run_simplified_rip();
+    void run_simplified_dvmrp();
     void insert_routing_table_entry(RoutingTableEntry &entry);
     void print_routing_table();
     bool has_channel_for(Node *node);
     void build_channel_for(Node *node);
+    void join_group(int gid);
+    void leave_group(int gid);
+private:
+    Node *get_neighbor(int id);
 };
 
 void Node::start_routing() {
@@ -70,8 +79,8 @@ void Node::start_routing() {
     t.detach();
 }
 
-void Node::start_simplified_rip() {
-    thread t(&Node::run_simplified_rip, this);
+void Node::start_simplified_dvmrp() {
+    thread t(&Node::run_simplified_dvmrp, this);
     t.detach();
 }
 
@@ -79,13 +88,18 @@ void Node::run_routing() {
 
     while (true) {
 
-        lock_guard<mutex> lg(routing_mtx);
+        lock_guard<mutex> lg(mtx);
 
-        if (is_new_packet) {
+        if (!is_new_packet)
+            continue;
+        
+        if (dest < routing_table.size()) {
+            // here we do the unicast    
             stringstream ss;
             int next_hop = routing_table[dest].next_hop_id;
             ss << "\n\nnode:\t" << id << "\npacket:\t" << packet
-                << "\ndest:\t" << dest << "\nstate: ";
+                << "\nsrc:\t" << src << "\ndest:\t" << dest
+                << "\nfrom:\t" << from << "\nstate: ";
             if (next_hop == -1)
                 ss << "dropped\n";
             else if (next_hop == id)
@@ -95,68 +109,115 @@ void Node::run_routing() {
                     if (neighbors[i]->id == next_hop) {
                         neighbors[i]->is_new_packet = true;
                         neighbors[i]->packet = packet;
+                        neighbors[i]->src = src;
                         neighbors[i]->dest = dest;
+                        neighbors[i]->from = id;
                         ss << "delivered to next hop node: " << next_hop << "\n";
                         break;
                     }        
-            is_new_packet = false;
             cout << ss.str() << endl;
+
+        } else if (src < routing_table.size()) {
+
+            // here we do the multicast
+
+            // if this node has joined the group identified by dest,
+            // print the info out to the console indicating the receival.
+            if (find(gids.begin(), gids.end(), dest) != gids.end()) {
+                cout << "\n\nnode:\t" << id << "\npacket:\t" << packet
+                     << "\nsrc:\t" << src << "\ndest:\t" << dest
+                     << "\nfrom:\t" << from << "\nstate:\treceived" << endl;
+            }
+
+            // accoring to TRPB, we do not route packet from any
+            // path other than the reverse path back to the source
+            if (from != routing_table[src].next_hop_id)
+                goto DONE;
+                
+            // links not having been used for routing for once
+            // is preserved in this not-used-links cache
+            vector<Node*> lcache = neighbors;
+            
+            for (size_t i = 0; !lcache.empty() && i < routing_table.size(); ++i) {
+                auto &entry = routing_table[i];
+                vector<int> _gids = entry.gids;
+                if (find(_gids.begin(), _gids.end(), dest) == _gids.end())
+                    continue;
+                
+                Node *link = get_neighbor(entry.next_hop_id);
+
+                // the packet has been sent through this link for once
+                if (find(lcache.begin(), lcache.end(), link) == lcache.end())
+                    continue;
+
+                // according to TRPB, we do not route packet through non-child links
+                int self2src_cost = routing_table[src].cost;
+                int link2src_cost = link->routing_table[src].cost;
+                if (self2src_cost > link2src_cost ||
+                    self2src_cost == link2src_cost && id > link->id)
+                    continue;
+
+                // if control should reach in here, send the packet out through this link
+                link->is_new_packet = true;
+                link->packet = packet;
+                link->src = src;
+                link->dest = dest;
+                link->from = id;
+
+                // mark the link as used by removing it from the not-used-links cache
+                lcache.erase(find(lcache.begin(), lcache.end(), link));
+            }
         }
+DONE:
+        is_new_packet = false;
     }
 }
 
-void Node::run_simplified_rip() {
+void Node::run_simplified_dvmrp() {
 
-    for (int i = 0; i < routing_table.size(); i = i < routing_table.size() - 1 ? i + 1 : 0) {
+    for (size_t i = 0; i < routing_table.size(); i = i < routing_table.size() - 1 ? i + 1 : 0) {
 
+        lock_guard<mutex> lg(mtx);
         auto &this_entry = routing_table[i];
-        lock_guard<mutex> lg(rip_mtx);
 
         if (this_entry.dest_id == id) {
             this_entry.next_hop_id = id;
+            this_entry.gids = gids;
             this_entry.cost = 0;
             continue;
         }
 
-        bool is_neighbor = false;
+        Node *neighbor = nullptr;
         for (int k = 0; k < neighbors.size(); ++k)
             if (this_entry.dest_id == neighbors[k]->id) {
-                is_neighbor = true;
+                neighbor = neighbors[k];
                 break;
             }
-        if (is_neighbor) {
-            this_entry.next_hop_id = this_entry.dest_id;
+        if (neighbor) {
+            this_entry.next_hop_id = neighbor->id;
+            this_entry.gids = neighbor->gids;
             this_entry.cost = 1;
             continue;
         }
 
+        this_entry.next_hop_id = -1;
+        this_entry.cost = 16;
+        this_entry.gids.clear();
+
         for (int j = 0; j < neighbors.size(); ++j) {
+        
             auto &nbr_entry = neighbors[j]->routing_table[i];
-
-            if (nbr_entry.next_hop_id == id &&
-                this_entry.next_hop_id == neighbors[j]->id) {
-                this_entry.next_hop_id = -1;
-                this_entry.cost = 16;
+        
+            if (nbr_entry.next_hop_id == -1 ||
+                nbr_entry.next_hop_id == id ||
+                nbr_entry.cost >= 15)
                 continue;
-            }
-
-            if (this_entry.next_hop_id == neighbors[j]->id) {
-                if (nbr_entry.next_hop_id == -1) {
-                    this_entry.next_hop_id = -1;
-                    this_entry.cost = 16;
-                    continue;
-                }
-                this_entry.cost = min(nbr_entry.cost + 1, 16);
-                if (this_entry.cost == 16)
-                    this_entry.next_hop_id = -1;
-                continue;
-            }
-
-            if (nbr_entry.next_hop_id != -1 &&
-                nbr_entry.cost + 1 < 16 &&
+        
+            if (this_entry.next_hop_id == -1 ||
                 nbr_entry.cost + 1 < this_entry.cost) {
                 this_entry.next_hop_id = neighbors[j]->id;
                 this_entry.cost = nbr_entry.cost + 1;
+                this_entry.gids = nbr_entry.gids;
             }
         }
         // print_routing_table();
@@ -183,6 +244,28 @@ void Node::build_channel_for(Node *node) {
     neighbors.push_back(node);
 }
 
+void Node::join_group(int gid) {
+
+    lock_guard<mutex> lg(mtx);
+    if (find(gids.begin(), gids.end(), gid) == gids.end())
+        gids.push_back(gid);
+}
+
+void Node::leave_group(int gid) {
+    
+    lock_guard<mutex> lg(mtx);
+    gids.erase(find(gids.begin(), gids.end(), gid));
+}
+
+Node *Node::get_neighbor(int id) {
+
+    for (size_t i = 0; i < neighbors.size(); ++i)
+        if (id == neighbors[i]->id)
+            return neighbors[i];
+
+    return nullptr;
+}
+
 class edge {
 public:
     unsigned a, b;
@@ -205,10 +288,12 @@ class Network {
 public:
     vector<Node> nodes;
     Network(int node_cnt = 20);
-    void build_channel(unsigned node1_id, unsigned node2_id);
+    void build_channel(int node1_id, int node2_id);
     void build_random_channels();
-    void start_rip_and_routing();
-    void transfer_packet(unsigned src, unsigned dest, int packet);
+    void start_dvmrp_and_routing();
+    void transfer_packet(int src, int dest, int packet);
+    void assign_group(int nodeid, int gid);
+    void cancel_group(int nodeid, int gid);
 private:
     default_random_engine e;
     uniform_int_distribution<unsigned> *u;
@@ -227,7 +312,7 @@ Network::Network(int node_cnt) {
     }
 }
 
-void Network::build_channel(unsigned node1_id, unsigned node2_id) {
+void Network::build_channel(int node1_id, int node2_id) {
     OVERFLOW_CHECK(node1_id, nodes)
     OVERFLOW_CHECK(node2_id, nodes)
     Node &node1 = nodes[node1_id];
@@ -252,20 +337,23 @@ void Network::build_random_channels() {
         build_channel(es[i].a, es[i].b);
 }
 
-void Network::start_rip_and_routing() {
+void Network::start_dvmrp_and_routing() {
     
     for (int i = 0; i < nodes.size(); ++i) {
-        nodes[i].start_simplified_rip();
+        nodes[i].start_simplified_dvmrp();
         nodes[i].start_routing();
     }
 }
 
-void Network::transfer_packet(unsigned src, unsigned dest, int packet) {
+void Network::transfer_packet(int src, int dest, int packet) {
 
-    lock_guard<mutex> lg(routing_mtx);
+    lock_guard<mutex> lg(mtx);
+    OVERFLOW_CHECK(src, nodes)
     nodes[src].is_new_packet = true;
     nodes[src].packet = packet;
+    nodes[src].src = src;
     nodes[src].dest = dest;
+    nodes[src].from = src;
 }
 
 edge Network::create_edge(unsigned a) {
@@ -278,12 +366,29 @@ edge Network::create_edge(unsigned a) {
     return edge(a, b);
 }
 
+void Network::assign_group(int nodeid, int gid) {
+    
+    OVERFLOW_CHECK(nodeid, nodes)
+    nodes[nodeid].join_group(gid);
+}
+
+void Network::cancel_group(int nodeid, int gid) {
+    OVERFLOW_CHECK(nodeid, nodes)
+    nodes[nodeid].leave_group(gid);
+}
+
 int main(void)
 {
     Network net(10);
 
     net.build_random_channels();
-    net.start_rip_and_routing();
+    net.start_dvmrp_and_routing();
+
+    net.assign_group(1, 18);
+    net.assign_group(3, 18);
+    net.assign_group(5, 18);
+    net.assign_group(9, 18);
+    net.assign_group(6, 18);
 
     int packet;
     unsigned src, dest;
