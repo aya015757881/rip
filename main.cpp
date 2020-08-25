@@ -138,8 +138,11 @@ void Node::run_routing() {
             vector<Node*> lcache = neighbors;
             
             for (size_t i = 0; !lcache.empty() && i < routing_table.size(); ++i) {
+
                 auto &entry = routing_table[i];
                 vector<int> _gids = entry.gids;
+
+                // if the node did not join the group indicated by dest, skip it
                 if (find(_gids.begin(), _gids.end(), dest) == _gids.end())
                     continue;
                 
