@@ -5,6 +5,7 @@
 #include <thread>
 #include <mutex>
 #include <random>
+#include <cassert>
 #define OVERFLOW_CHECK(index, vec) \
             if (index < 0 || index > vec.size() - 1) { \
                 stringstream ss;    \
@@ -103,17 +104,16 @@ void Node::run_routing() {
                 ss << "dropped\n";
             else if (next_hop == id)
                 ss << "received\n";
-            else
-                for (size_t i = 0; i < neighbors.size(); ++i)
-                    if (neighbors[i]->id == next_hop) {
-                        neighbors[i]->is_new_packet = true;
-                        neighbors[i]->packet = packet;
-                        neighbors[i]->src = src;
-                        neighbors[i]->dest = dest;
-                        neighbors[i]->from = id;
-                        ss << "delivered to next hop node: " << next_hop << "\n";
-                        break;
-                    }        
+            else {
+                Node *nbr = get_neighbor(next_hop);
+                assert(nbr != nullptr);
+                nbr->is_new_packet = true;
+                nbr->packet = packet;
+                nbr->src = src;
+                nbr->dest = dest;
+                nbr->from = id;
+                ss << "delivered to next hop node: " << next_hop << "\n";
+            }        
             cout << ss.str() << endl;
 
         } else if (src < routing_table.size()) {
