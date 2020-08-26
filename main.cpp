@@ -100,6 +100,7 @@ void Node::run_routing() {
             ss << "\n\nnode:\t" << id << "\npacket:\t" << packet
                 << "\nsrc:\t" << src << "\ndest:\t" << dest
                 << "\nfrom:\t" << from << "\nstate: ";
+            
             if (next_hop == -1)
                 ss << "dropped\n";
             else if (next_hop == id)
@@ -114,6 +115,7 @@ void Node::run_routing() {
                 nbr->from = id;
                 ss << "delivered to next hop node: " << next_hop << "\n";
             }        
+            
             cout << ss.str() << endl;
 
         } else if (src < routing_table.size()) {
@@ -189,15 +191,11 @@ void Node::run_simplified_dvmrp() {
             continue;
         }
 
-        Node *neighbor = nullptr;
-        for (int k = 0; k < neighbors.size(); ++k)
-            if (this_entry.dest_id == neighbors[k]->id) {
-                neighbor = neighbors[k];
-                break;
-            }
-        if (neighbor) {
-            this_entry.next_hop_id = neighbor->id;
-            this_entry.gids = neighbor->gids;
+        Node *nbr = get_neighbor(this_entry.dest_id);
+
+        if (nbr) {
+            this_entry.next_hop_id = nbr->id;
+            this_entry.gids = nbr->gids;
             this_entry.cost = 1;
             continue;
         }
