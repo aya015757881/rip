@@ -94,6 +94,7 @@ void Node::run_routing() {
             continue;
         
         if (dest < routing_table.size()) {
+            
             // here we do the unicast    
             stringstream ss;
             int next_hop = routing_table[dest].next_hop_id;
